@@ -2,6 +2,8 @@ import time
 import config
 from storage import PortfolioManager
 from binance_api import BinanceClient
+from datetime import datetime
+
 
 class BotController:
     def __init__(self):
@@ -43,6 +45,52 @@ class BotController:
         avg_vol = sum(volumes[-25:-1]) / 24
         if avg_vol == 0: return 0.0
         return current_vol / avg_vol
+
+    def find_zombie_position(self):
+        """
+        Procura uma posição 'Zumbi' para sacrificar.
+        Critério: Segurando há mais de 4 horas E PnL Negativo.
+        """
+        positions = self.db.data['active_positions']
+        worst_symbol = None
+        worst_pnl = 0.0
+        
+        # Horário agora (UTC) para comparação justa
+        now = datetime.utcnow() # JSON salva em BRT, mas vamos simplificar o delta
+        # Nota: Idealmente converteríamos tudo para objetos datetime conscientes,
+        # mas para estimativa de horas, comparar timestamps simples funciona se o formato for consistente.
+        
+        for symbol, data in positions.items():
+            # 1. Calcula tempo de casa
+            try:
+                # O formato salvo no storage.py é '%Y-%m-%d %H:%M:%S'
+                # Precisamos calcular quantas horas se passaram
+                entry_dt = datetime.strptime(data['entry_time'], '%Y-%m-%d %H:%M:%S')
+                # Ajuste fuso horário manual se necessário, mas vamos focar na diferença bruta
+                # Se entry_time é BRT (UTC-3) e now é UTC, temos que ajustar
+                entry_dt_adjusted = entry_dt + timedelta(hours=3) # Converte BRT visual para UTC real
+                
+                duration = (now - entry_dt_adjusted).total_seconds() / 3600 # Horas
+            except:
+                duration = 0
+
+            # 2. Calcula PnL atual
+            current_price = self.api.get_price(symbol)
+            if not current_price: continue
+            pnl_pct = ((current_price - data['buy_price']) / data['buy_price']) * 100
+
+            # CRITÉRIO DE CORTE:
+            # Se tem mais de 3 horas de vida E está no prejuízo
+            if duration > 3.0 and pnl_pct < 0:
+                print(f"   💀 Candidato a Zumbi: {symbol} (PnL {pnl_pct:.2f}% | {duration:.1f}h)")
+                
+                # Queremos eliminar o que tem o PIOR desempenho ou MAIOR tempo
+                # Aqui vamos priorizar quem está dando mais prejuízo para estancar sangria
+                if pnl_pct < worst_pnl:
+                    worst_pnl = pnl_pct
+                    worst_symbol = symbol
+
+        return worst_symbol
 
     # --- LÓGICA DE TRAILING STOP & GESTÃO ---
     def manage_portfolio(self):
@@ -162,8 +210,26 @@ class BotController:
             print(f"   🧐 {sym:<10} | RSI: {rsi:.1f} | EMA: {status_icon} | RVOL: {rvol:.1f}x")
 
             if trend_ok:
-                self.execute_buy(sym, current_price, rsi)
-                break # Comprou um? Para o scanner por este ciclo para não gastar tudo de uma vez
+                
+                success = self.execute_buy(sym, current_price, rsi)
+                
+                if not success: 
+                    # --- LÓGICA DE SWAP (NOVO) ---
+                    # Se falhou por saldo E o sinal é MUITO bom (RSI < 20), tenta trocar
+                    if rsi < 20:
+                        print(f"   🔄 Sem saldo para {sym}. Procurando Zumbis para troca...")
+                        zombie = self.find_zombie_position()
+                        
+                        if zombie:
+                            print(f"   ⚔️ TROCA TÁTICA: Vendendo {zombie} para comprar {sym}")
+                            self.close_position(zombie, self.api.get_price(zombie), "SWAP por Oportunidade Melhor")
+                            time.sleep(2) # Espera vender e liberar saldo
+                            self.execute_buy(sym, current_price, rsi) # Tenta comprar de novo
+                        else:
+                            print("   ❄️ Nenhuma posição Zumbi encontrada (todas recentes ou no lucro).")
+                
+                if success or (rsi < 20 and zombie): # Se comprou ou trocou, para o scanner
+                    break
             
             time.sleep(0.2) # Delay leve
 
@@ -188,7 +254,7 @@ class BotController:
             # Se o saldo for menor que o mínimo, não adianta tentar, a API rejeita (Erro -2010)
             # Mas aqui podemos adicionar um log silencioso ou warning apenas se for muito critico
             # print(f"   ⚠️ Saldo insuficiente (${balance:.2f}) para {symbol}")
-            return
+            return False
 
         # Definimos o valor da compra.
         # Em vez de % da banca, usamos o valor fixo mínimo para diversificar ao máximo.
@@ -205,9 +271,11 @@ class BotController:
         
         if not config.SIMULATION_MODE:
             res = self.api.place_order(symbol, 'BUY', amount)
-            if not res: return
+            if not res: return False
         
         self.db.add_position(symbol, price, amount, rsi)
+
+        return True
 
     # --- LOOP ---
     def run(self):
