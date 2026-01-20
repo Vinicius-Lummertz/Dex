@@ -20,7 +20,7 @@ AMOUNT_TO_TRADE = 15.0       # Valor base por trade
 
 # Indicadores (RSI)
 RSI_PERIOD = 14
-RSI_BUY_THRESHOLD = 20       # Compra abaixo de 20
+RSI_BUY_THRESHOLD = 23       # Compra abaixo de 20
 
 # Trailing Stop Dinâmico (Escadinha / Ladder Strategy)
 # 1. O Berço (Proteção): Lucro < 3% -> Stop curto de 2.5%
