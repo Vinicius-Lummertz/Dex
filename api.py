@@ -75,9 +75,17 @@ def get_positions():
             current_price = api.get_price(symbol)
             
         pnl_est = 0.0
+        pnl_usdt = 0.0
+        
         if current_price and data['buy_price'] > 0:
             pnl_est = ((current_price - data['buy_price']) / data['buy_price']) * 100
             
+            # Calcula PnL em USDT
+            # Quantidade de moedas = Investido / Preço de Compra
+            coin_qty = data['amount_usdt'] / data['buy_price']
+            current_value = coin_qty * current_price
+            pnl_usdt = current_value - data['amount_usdt']
+
         pos = {
             "symbol": symbol,
             "buy_price": data['buy_price'],
@@ -87,6 +95,7 @@ def get_positions():
             "rsi_entry": data.get('rsi_entry', 0.0),
             "current_price": current_price,
             "pnl_est_percent": round(pnl_est, 2),
+            "pnl_usdt": round(pnl_usdt, 2), # NOVO
             "stop_price": data.get('stop_price', 0.0),
             "status_label": data.get('status_label', 'HOLD')
         }

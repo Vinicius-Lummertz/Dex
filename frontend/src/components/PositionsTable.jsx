@@ -43,7 +43,8 @@ const PositionsTable = ({ positions }) => {
                             <th className="px-6 py-4">Max Price</th>
                             <th className="px-6 py-4">Stop Price</th>
                             <th className="px-6 py-4">Invested</th>
-                            <th className="px-6 py-4">PnL</th>
+                            <th className="px-6 py-4">PnL (%)</th>
+                            <th className="px-6 py-4">PnL ($)</th>
                             <th className="px-6 py-4">Status</th>
                             <th className="px-6 py-4 text-right">Actions</th>
                         </tr>
@@ -65,10 +66,13 @@ const PositionsTable = ({ positions }) => {
                                             {pos.pnl_est_percent}%
                                         </div>
                                     </td>
+                                    <td className={`px-6 py-4 font-bold ${pos.pnl_usdt >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
+                                        ${pos.pnl_usdt?.toFixed(2)}
+                                    </td>
                                     <td className="px-6 py-4">
                                         <span className={`px-2 py-1 rounded text-xs font-bold border ${pos.status_label.includes('MOONSHOT') ? 'bg-purple-500/10 text-purple-400 border-purple-500/30' :
-                                                pos.status_label.includes('TENDÊNCIA') ? 'bg-blue-500/10 text-blue-400 border-blue-500/30' :
-                                                    'bg-slate-500/10 text-slate-400 border-slate-500/30'
+                                            pos.status_label.includes('TENDÊNCIA') ? 'bg-blue-500/10 text-blue-400 border-blue-500/30' :
+                                                'bg-slate-500/10 text-slate-400 border-slate-500/30'
                                             }`}>
                                             {pos.status_label}
                                         </span>
