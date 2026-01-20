@@ -114,6 +114,11 @@ def get_logs(limit: int = 50):
     conn.close()
     return logs
 
+@app.get("/api/candidates")
+def get_candidates():
+    """Returns the current watchlist candidates."""
+    return db.get_candidates()
+
 @app.get("/api/history")
 def get_history():
     """Returns balance history for charting."""

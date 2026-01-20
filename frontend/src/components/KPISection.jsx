@@ -1,8 +1,10 @@
 import React from 'react';
 import { TrendingUp, TrendingDown, DollarSign, Activity } from 'lucide-react';
 
-const KPISection = ({ data }) => {
-    const { wallet_summary, active_positions_count } = data;
+const KPISection = ({ summary }) => {
+    if (!summary || !summary.wallet_summary) return null;
+
+    const { wallet_summary, active_positions_count } = summary;
     const equity = wallet_summary.current_equity;
 
     // Mock daily change for now, or calculate if history is available

@@ -76,6 +76,17 @@ class PortfolioManager:
             )
         ''')
 
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS candidates (
+                symbol TEXT PRIMARY KEY,
+                price REAL,
+                rsi REAL,
+                rvol REAL,
+                status TEXT,
+                updated_at TEXT
+            )
+        ''')
+
         # --- MIGRAÇÃO AUTOMÁTICA (Adiciona colunas novas se não existirem) ---
         # Verifica se stop_price existe na tabela positions
         cursor.execute("PRAGMA table_info(positions)")
@@ -88,6 +99,14 @@ class PortfolioManager:
         if 'status_label' not in columns:
             print("⚙️ Migrando DB: Adicionando coluna 'status_label'...")
             cursor.execute("ALTER TABLE positions ADD COLUMN status_label TEXT DEFAULT 'HOLD'")
+
+        # Verifica se status existe na tabela candidates
+        cursor.execute("PRAGMA table_info(candidates)")
+        c_columns = [info[1] for info in cursor.fetchall()]
+        
+        if 'status' not in c_columns:
+            print("⚙️ Migrando DB: Adicionando coluna 'status' em candidates...")
+            cursor.execute("ALTER TABLE candidates ADD COLUMN status TEXT")
         
         conn.commit()
         conn.close()
@@ -245,3 +264,31 @@ class PortfolioManager:
         except Exception as e:
             print(f"Erro ao atualizar status da posição: {e}")
         conn.close()
+
+    # --- CANDIDATES WATCHLIST ---
+    def save_candidates(self, candidates):
+        """Salva a lista de candidatos (Top 10)"""
+        conn = self._get_conn()
+        
+        # Limpa tabela anterior (queremos apenas o snapshot atual)
+        conn.execute("DELETE FROM candidates")
+        
+        ts = self.get_timestamp_brt()
+        for c in candidates:
+            conn.execute('''
+                INSERT INTO candidates (symbol, price, rsi, rvol, status, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+            ''', (c['symbol'], c['price'], c['rsi'], c['rvol'], c['status'], ts))
+            
+        conn.commit()
+        conn.close()
+
+    def get_candidates(self):
+        """Retorna a lista de candidatos"""
+        conn = self._get_conn()
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM candidates ORDER BY rsi ASC") # Ordena por RSI (menor = melhor oportunidade)
+        rows = [dict(row) for row in cursor.fetchall()]
+        conn.close()
+        return rows

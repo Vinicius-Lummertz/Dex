@@ -56,6 +56,134 @@ class BotController:
         if avg_vol == 0: return 0.0
         return current_vol / avg_vol
 
+    # --- HELPER DE LOG ---
+    def log_event(self, level, type, message):
+        """Centraliza logs para Console e DB"""
+        print(f"   {message}") # Console
+        self.db.log_system_event(level, type, message) # DB
+
+    # --- GESTÃO DE CARTEIRA ---
+    def update_financials(self):
+        # 1. Atualiza Saldo USDT
+        acc = self.api.get_account()
+        usdt_free = 0.0
+        if acc:
+            for b in acc['balances']:
+                if b['asset'] == 'USDT':
+                    usdt_free = float(b['free'])
+                    break
+        else:
+            # Em simulação, estimamos o livre subtraindo o alocado do inicial
+            invested = sum(p['amount_usdt'] for p in self.db.data['active_positions'].values())
+            usdt_free = max(0, 100.0 - invested) # Assumindo 100 inicial
+
+        # 2. Soma Valor das Posições (Mark-to-Market)
+        positions_value = 0.0
+        positions = self.db.data['active_positions']
+        
+        for symbol, data in positions.items():
+            current_price = self.api.get_price(symbol)
+            if current_price:
+                # Estima quantidade de moedas
+                coin_qty = data['amount_usdt'] / data['buy_price']
+                positions_value += (coin_qty * current_price)
+            else:
+                positions_value += data['amount_usdt'] # Fallback
+        
+        total_equity = usdt_free + positions_value
+        
+        # 3. Salva e Loga
+        self.db.update_wallet_summary(total_equity)
+        
+        # Log histórico se mudou significativamente
+        fluctuation = 0.0
+        if self.last_equity > 0:
+            fluctuation = ((total_equity - self.last_equity) / self.last_equity) * 100
+            
+        self.db.log_history(total_equity, f"{fluctuation:+.2f}%")
+        self.last_equity = total_equity
+        
+        return total_equity
+
+    def manage_portfolio(self):
+        positions = self.db.data['active_positions']
+        if not positions: return
+
+        print(f"   💼 Gerenciando {len(positions)} posições...")
+        
+        for symbol, data in list(positions.items()):
+            current_price = self.api.get_price(symbol)
+            if not current_price: continue
+
+            buy_price = data['buy_price']
+            highest = data['highest_price']
+            
+            # Atualiza Topo
+            if current_price > highest:
+                highest = current_price
+                self.db.update_position_high(symbol, highest)
+
+            # Cálculos
+            pnl_pct = (current_price - buy_price) / buy_price
+            
+            # Lucro Máximo Atingido (High Water Mark)
+            max_profit_pct = (highest - buy_price) / buy_price
+            
+            # --- DYNAMIC TRAILING STOP (LADDER STRATEGY) ---
+            if max_profit_pct < config.LADDER_1_THRESHOLD:
+                # Nível 1: Proteção (Lucro < 3%)
+                drop_limit = config.LADDER_1_STOP # 2.5%
+                mode = "🛡️ PROTEÇÃO"
+            elif max_profit_pct < config.LADDER_2_THRESHOLD:
+                # Nível 2: Tendência (Lucro 3% - 7%)
+                drop_limit = config.LADDER_2_STOP # 4.5%
+                mode = "📈 TENDÊNCIA"
+            else:
+                # Nível 3: Moonshot (Lucro > 7%)
+                drop_limit = config.LADDER_3_STOP # 6.0%
+                mode = "🚀 MOONSHOT"
+
+            # Define Stop Price (Trailing)
+            stop_price = highest * (1 - drop_limit)
+            
+            # Define Status
+            status_label = "HOLD"
+            if pnl_pct > 0.01: status_label = "PROFIT"
+            if pnl_pct < -0.01: status_label = "LOSS"
+            
+            # Salva status no DB para o Dashboard
+            self.db.update_position_status(symbol, stop_price, status_label)
+
+            # 1. Trailing Stop Loss Dinâmico
+            if current_price <= stop_price:
+                reason = f"Trailing Stop {mode} (Topo ${highest:.4f})"
+                self.log_event("INFO", "SELL", f"🔻 SAÍDA {symbol} | PnL: {pnl_pct*100:.2f}% | {mode}")
+                self.close_position(symbol, current_price, reason)
+                continue
+
+            # 2. Stop Loss de Emergência (Fixo)
+            if pnl_pct <= -config.STOP_LOSS_PERCENT:
+                reason = "Stop Loss Fixo"
+                self.log_event("WARNING", "SELL", f"🛑 STOP LOSS {symbol} | PnL: {pnl_pct*100:.2f}%")
+                self.close_position(symbol, current_price, reason)
+                continue
+            
+            # 3. Take Profit (Alvo Fixo - Opcional, o Trailing costuma ser melhor)
+            if pnl_pct >= config.TAKE_PROFIT_PERCENT:
+                reason = "Take Profit Alvo"
+                self.log_event("SUCCESS", "SELL", f"💰 TAKE PROFIT {symbol} | PnL: {pnl_pct*100:.2f}%")
+                self.close_position(symbol, current_price, reason)
+                continue
+
+            # Notificações de PnL (Telegram)
+            if pnl_pct > 0.03 and f"{symbol}_3%" not in self.alert_tracker:
+                self.notifier.send_alert(symbol, "Lucro > 3%", "HOLD", current_price, f"📈 PnL: +{pnl_pct*100:.1f}%")
+                self.alert_tracker.add(f"{symbol}_3%")
+            
+            if pnl_pct > 0.05 and f"{symbol}_5%" not in self.alert_tracker:
+                self.notifier.send_alert(symbol, "Lucro > 5%", "HOLD", current_price, f"🚀 PnL: +{pnl_pct*100:.1f}%")
+                self.alert_tracker.add(f"{symbol}_5%")
+
     def find_zombie_position(self, candidate_rsi=100):
         """
         Procura uma posição 'Zumbi' para sacrificar.
@@ -71,7 +199,7 @@ class BotController:
         min_hours = 2.0
         if candidate_rsi < 18.0:
             min_hours = 0.0
-            print(f"   🚨 URGÊNCIA DETECTADA (RSI {candidate_rsi:.1f}): Ignorando tempo mínimo de posição.")
+            self.log_event("WARNING", "SWAP", f"🚨 URGÊNCIA DETECTADA (RSI {candidate_rsi:.1f}): Ignorando tempo mínimo de posição.")
 
         now = datetime.now(timezone.utc)
         
@@ -96,46 +224,26 @@ class BotController:
             # CRITÉRIO DE CORTE DINÂMICO:
             # Se tem mais tempo que o minimo exigido E está no prejuízo
             if duration >= min_hours and pnl_pct < -0.05: # -0.05% margem para não vender 0x0
-                print(f"   💀 Candidato a Zumbi: {symbol} (PnL {pnl_pct:.2f}% | {duration:.1f}h)")
+                # self.log_event("INFO", "ZOMBIE", f"💀 Candidato a Zumbi: {symbol} (PnL {pnl_pct:.2f}% | {duration:.1f}h)")
                 
-            acc = self.api.get_account()
-            if acc:
-                for b in acc['balances']:
-                    if b['asset'] == 'USDT':
-                        usdt_free = float(b['free'])
-                        break
-        else:
-            # Em simulação, estimamos o livre subtraindo o alocado do inicial
-            invested = sum(p['amount_usdt'] for p in self.db.data['active_positions'].values())
-            usdt_free = max(0, 100.0 - invested) # Assumindo 100 inicial
+                # Queremos o PIOR desempenho para eliminar (Stop Loss tático)
+                if pnl_pct < worst_pnl:
+                    worst_pnl = pnl_pct
+                    worst_symbol = symbol
+        
+        return worst_symbol
 
-        # 2. Soma Valor das Posições (Mark-to-Market)
-        positions_value = 0.0
-        positions = self.db.data['active_positions']
-        
-        for symbol, data in positions.items():
-            current_price = self.api.get_price(symbol)
-            if current_price:
-                # Estima quantidade de moedas
-                coin_qty = data['amount_usdt'] / data['buy_price']
-                positions_value += (coin_qty * current_price)
-            else:
-                positions_value += data['amount_usdt'] # Fallback
-        
-        total_equity = positions_value
-        
-        # 3. Salva e Loga
-        self.db.update_wallet_summary(total_equity)
-        
-        # Log histórico se mudou significativamente
-        fluctuation = 0.0
-        if self.last_equity > 0:
-            fluctuation = ((total_equity - self.last_equity) / self.last_equity) * 100
+    def close_position(self, symbol, price, reason):
+        # Usa o TradeExecutor para vender
+        success = self.executor.sell_position(symbol, price, reason)
+        if success:
+            # Limpa tracker de alertas
+            keys_to_remove = [k for k in self.alert_tracker if k.startswith(symbol)]
+            for k in keys_to_remove: self.alert_tracker.remove(k)
             
-        self.db.log_history(total_equity, f"{fluctuation:+.2f}%")
-        self.last_equity = total_equity
-        
-        return total_equity
+            # Cooldown: Não compra a mesma moeda por X minutos
+            self.cooldowns[symbol] = datetime.now() + timedelta(minutes=self.COOLDOWN_TIME_MINUTES)
+            self.log_event("INFO", "COOLDOWN", f"❄️ {symbol} em cooldown por {self.COOLDOWN_TIME_MINUTES}min")
 
     # --- SCANNER ---
     def scan_market(self):
@@ -153,14 +261,22 @@ class BotController:
             if sym in active_symbols: continue
             if float(t['quoteVolume']) < config.MIN_VOLUME_USDT: continue
             
+            # Verifica Cooldown
+            if sym in self.cooldowns:
+                if datetime.now() < self.cooldowns[sym]:
+                    continue
+                else:
+                    del self.cooldowns[sym] # Expired
+
             candidates.append({'symbol': sym, 'change': float(t['priceChangePercent'])})
 
         # Ordena pelas que mais caíram/subiram (Interesse do mercado)
         candidates.sort(key=lambda x: abs(x['change']), reverse=True)
         
         # 2. Filtro Fino (Indicadores Técnicos)
-        # Analisa até 10 candidatos para achar O MELHOR, não o primeiro que aparecer
-        checked_count = 0
+        # Analisa até 15 candidatos para achar O MELHOR
+        
+        watchlist = [] # Lista para salvar no banco
         
         for cand in candidates[:15]: 
             sym = cand['symbol']
@@ -173,53 +289,66 @@ class BotController:
 
             # A. Calcula RSI
             rsi = self.calculate_rsi(prices)
-            if not rsi or rsi > config.RSI_BUY_THRESHOLD: 
-                continue # Falhou no RSI, ignora
+            if not rsi: continue
 
             # B. Calcula EMA (Tendência)
-            # Queremos comprar apenas se o preço estiver ACIMA da EMA 100 (Tendência de Alta)
-            # OU se estivermos agressivos, podemos ignorar isso, mas para segurança é bom.
             ema = self.calculate_ema(prices, period=100)
             current_price = prices[-1]
             
             trend_ok = True
+            status_reason = "WAIT"
+            
+            if rsi > config.RSI_BUY_THRESHOLD:
+                status_reason = f"RSI High ({rsi:.1f})"
+                trend_ok = False
+            
             if ema and current_price < ema:
-                # O preço está abaixo da média de 100 períodos. É uma tendência de baixa.
-                # Só compramos se o RSI for MUITO baixo (Ex: < 20) para justificar o risco.
+                # Tendência de baixa
                 if rsi > 20: 
                     trend_ok = False
+                    status_reason = "Downtrend"
             
             # C. Calcula RVOL (Volume Relativo)
-            # Queremos ver se o volume está aumentando (interesse comprador)
             rvol = self.calculate_rvol(volumes)
             
-            # LOG DO CANDIDATO (Feedback visual do porquê comprou ou rejeitou)
+            # Adiciona à Watchlist
+            watchlist.append({
+                'symbol': sym,
+                'price': current_price,
+                'rsi': rsi,
+                'rvol': rvol,
+                'status': "BUY" if trend_ok else status_reason
+            })
+            
+            # LOG DO CANDIDATO
             status_icon = "✅" if trend_ok else "❌"
-            print(f"   🧐 {sym:<10} | RSI: {rsi:.1f} | EMA: {status_icon} | RVOL: {rvol:.1f}x")
+            print(f"   🧐 {sym:<10} | RSI: {rsi:.1f} | EMA: {status_icon} | RVOL: {rvol:.1f}x | {status_reason}")
 
             if trend_ok:
-                
                 success = self.execute_buy(sym, current_price, rsi)
                 
                 if not success: 
-                    # --- LÓGICA DE SWAP (NOVO) ---
-                    # Se falhou por saldo E o sinal é MUITO bom (RSI < 20), tenta trocar
+                    # --- LÓGICA DE SWAP ---
                     if rsi < 20:
-                        print(f"   🔄 Sem saldo para {sym}. Procurando Zumbis para troca...")
+                        self.log_event("WARNING", "SWAP", f"🔄 Sem saldo para {sym}. Procurando Zumbis para troca...")
                         zombie = self.find_zombie_position(candidate_rsi=rsi)
                         
                         if zombie:
-                            print(f"   ⚔️ TROCA TÁTICA: Vendendo {zombie} para comprar {sym}")
+                            self.log_event("WARNING", "SWAP", f"⚔️ TROCA TÁTICA: Vendendo {zombie} para comprar {sym}")
                             self.close_position(zombie, self.api.get_price(zombie), "SWAP por Oportunidade Melhor")
-                            time.sleep(2) # Espera vender e liberar saldo
-                            self.execute_buy(sym, current_price, rsi) # Tenta comprar de novo
+                            time.sleep(2) 
+                            self.execute_buy(sym, current_price, rsi) 
                         else:
-                            print("   ❄️ Nenhuma posição Zumbi encontrada (todas recentes ou no lucro).")
+                            print("   ❄️ Nenhuma posição Zumbi encontrada.")
                 
-                if success or (rsi < 20 and zombie): # Se comprou ou trocou, para o scanner
+                if success or (rsi < 20 and zombie): 
                     break
             
             time.sleep(0.2) # Delay leve
+
+        # Salva Watchlist no Banco
+        if watchlist:
+            self.db.save_candidates(watchlist)
 
     def execute_buy(self, symbol, price, rsi):
         # --- GESTÃO DE CAPITAL PARA PEQUENAS CONTAS ---
@@ -235,17 +364,12 @@ class BotController:
             balance = 100.0 # Simulação
 
         # Custo mínimo operacional (Binance pede $5, usamos $5.5 para garantir taxas e flutuação)
-        # Isso maximiza o número de "balas" que temos para atirar.
         MIN_VIABLE_TRADE = 5.5 
 
         if balance < MIN_VIABLE_TRADE:
-            # Se o saldo for menor que o mínimo, não adianta tentar, a API rejeita (Erro -2010)
-            # Mas aqui podemos adicionar um log silencioso ou warning apenas se for muito critico
-            # print(f"   ⚠️ Saldo insuficiente (${balance:.2f}) para {symbol}")
             return False
 
         # Definimos o valor da compra.
-        # Em vez de % da banca, usamos o valor fixo mínimo para diversificar ao máximo.
         amount = MIN_VIABLE_TRADE
 
         # Trava de segurança: Se o saldo for tipo $5.80, usa tudo ($5.80) em vez de tentar guardar $0.30
@@ -255,7 +379,7 @@ class BotController:
         # Arredonda para 2 casas para evitar erros de precisão na API
         amount = round(amount - 0.1, 2) # Tira 10 centavos para garantir que não vai faltar taxa
 
-        print(f"   🚀 COMPRANDO {symbol} | RSI {rsi:.2f} | Alvo: ${amount:.2f}")
+        self.log_event("SUCCESS", "BUY", f"🚀 COMPRANDO {symbol} | RSI {rsi:.2f} | Alvo: ${amount:.2f}")
         
         if not config.SIMULATION_MODE:
             res = self.api.place_order(symbol, 'BUY', amount)
@@ -270,8 +394,8 @@ class BotController:
 
     # --- LOOP ---
     def run(self):
-        print(f"🤖 BOT V2 INICIADO (Trailing Stop Ativo)")
-        print(f"📂 Configuração: Queda Max {config.TRAILING_DROP_PERCENT*100}% do Topo")
+        print(f"🤖 BOT V2 INICIADO (Trailing Stop Dinâmico)")
+        print(f"📂 Configuração: Escadinha (2.5% -> 4.5% -> 6.0%)")
         
         while True:
             try:

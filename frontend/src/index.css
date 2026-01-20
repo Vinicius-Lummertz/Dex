@@ -2,6 +2,46 @@
 @tailwind components;
 @tailwind utilities;
 
+:root {
+    font-family: Inter, system-ui, Avenir, Helvetica, Arial, sans-serif;
+    line-height: 1.5;
+    font-weight: 400;
+
+    color-scheme: light dark;
+    color: rgba(255, 255, 255, 0.87);
+    background-color: #242424;
+
+    font-synthesis: none;
+    text-rendering: optimizeLegibility;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+}
+
 body {
-    @apply bg-slate-950 text-slate-200;
+    margin: 0;
+    min-width: 320px;
+    min-height: 100vh;
+    @apply bg-slate-900 text-white;
+}
+
+/* --- DARK SCROLLBARS --- */
+::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+}
+
+::-webkit-scrollbar-track {
+    background: #1e293b;
+    /* slate-800 */
+}
+
+::-webkit-scrollbar-thumb {
+    background: #475569;
+    /* slate-600 */
+    border-radius: 5px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+    background: #64748b;
+    /* slate-500 */
 }
