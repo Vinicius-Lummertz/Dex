@@ -78,3 +78,4 @@ watchfiles==1.1.1
 websockets==16.0
 wsproto==1.3.2
 yarl==1.22.0
+psycopg2-binary==2.9.9

@@ -99,6 +99,10 @@ class PortfolioManager:
         if 'status_label' not in columns:
             print("⚙️ Migrando DB: Adicionando coluna 'status_label'...")
             cursor.execute("ALTER TABLE positions ADD COLUMN status_label TEXT DEFAULT 'HOLD'")
+            
+        if 'strategy_type' not in columns:
+            print("⚙️ Migrando DB: Adicionando coluna 'strategy_type'...")
+            cursor.execute("ALTER TABLE positions ADD COLUMN strategy_type TEXT DEFAULT 'CONSERVATIVE'")
 
         # Verifica se status existe na tabela candidates
         cursor.execute("PRAGMA table_info(candidates)")
@@ -139,7 +143,8 @@ class PortfolioManager:
                 'rsi_at_entry': row['rsi_at_entry'],
                 'entry_time': row['entry_time'],
                 'stop_price': row['stop_price'] if 'stop_price' in row.keys() else 0.0,
-                'status_label': row['status_label'] if 'status_label' in row.keys() else 'HOLD'
+                'status_label': row['status_label'] if 'status_label' in row.keys() else 'HOLD',
+                'strategy_type': row['strategy_type'] if 'strategy_type' in row.keys() else 'CONSERVATIVE'
             }
             
         # 2. Histórico (Pega os últimos 1000 para não pesar)
@@ -171,12 +176,12 @@ class PortfolioManager:
     # ⚙️ MÉTODOS DE ESCRITA (Bot usa isso)
     # ==============================================================================
 
-    def add_position(self, symbol, price, amount, rsi):
+    def add_position(self, symbol, price, amount, rsi, strategy_type='CONSERVATIVE'):
         conn = self._get_conn()
         conn.execute('''
-            INSERT OR REPLACE INTO positions (symbol, buy_price, highest_price, amount_usdt, rsi_at_entry, entry_time)
-            VALUES (?, ?, ?, ?, ?, ?)
-        ''', (symbol, price, price, amount, rsi, self.get_timestamp_brt()))
+            INSERT OR REPLACE INTO positions (symbol, buy_price, highest_price, amount_usdt, rsi_at_entry, entry_time, strategy_type)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        ''', (symbol, price, price, amount, rsi, self.get_timestamp_brt(), strategy_type))
         conn.commit()
         conn.close()
 

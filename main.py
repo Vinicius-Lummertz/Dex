@@ -117,6 +117,7 @@ class BotController:
 
             buy_price = data['buy_price']
             highest = data['highest_price']
+            strategy_type = data.get('strategy_type', 'CONSERVATIVE')
             
             # Atualiza Topo
             if current_price > highest:
@@ -125,64 +126,86 @@ class BotController:
 
             # Cálculos
             pnl_pct = (current_price - buy_price) / buy_price
-            
-            # Lucro Máximo Atingido (High Water Mark)
             max_profit_pct = (highest - buy_price) / buy_price
             
-            # --- DYNAMIC TRAILING STOP (LADDER STRATEGY) ---
-            if max_profit_pct < config.LADDER_1_THRESHOLD:
-                # Nível 1: Proteção (Lucro < 3%)
-                drop_limit = config.LADDER_1_STOP # 2.5%
-                mode = "🛡️ PROTEÇÃO"
-            elif max_profit_pct < config.LADDER_2_THRESHOLD:
-                # Nível 2: Tendência (Lucro 3% - 7%)
-                drop_limit = config.LADDER_2_STOP # 4.5%
-                mode = "📈 TENDÊNCIA"
+            # === LÓGICA DIFERENCIADA POR ESTRATÉGIA ===
+            
+            if strategy_type == 'SCALP':
+                # 🔥 SCALP: Stop Fixo -1% / Take Profit Fixo +2.5%
+                stop_price = buy_price * (1 - config.SCALP_STOP_LOSS)
+                tp_price = buy_price * (1 + config.SCALP_TAKE_PROFIT)
+                
+                status_label = "SCALP"
+                if pnl_pct > 0: status_label = "SCALP_PROFIT"
+                if pnl_pct < 0: status_label = "SCALP_LOSS"
+                
+                self.db.update_position_status(symbol, stop_price, status_label)
+                
+                # Stop Loss Scalp (-1%)
+                if current_price <= stop_price:
+                    reason = f"Scalp Stop -1%"
+                    self.log_event("INFO", "SELL", f"⚡ SCALP STOP {symbol} | PnL: {pnl_pct*100:.2f}%")
+                    self.close_position(symbol, current_price, reason)
+                    continue
+                
+                # Take Profit Scalp (+2.5%)
+                if current_price >= tp_price:
+                    reason = f"Scalp TP +2.5%"
+                    self.log_event("SUCCESS", "SELL", f"⚡💰 SCALP TP {symbol} | PnL: {pnl_pct*100:.2f}%")
+                    self.close_position(symbol, current_price, reason)
+                    continue
+                    
             else:
-                # Nível 3: Moonshot (Lucro > 7%)
-                drop_limit = config.LADDER_3_STOP # 6.0%
-                mode = "🚀 MOONSHOT"
+                # 🛡️ CONSERVATIVE: Trailing Stop Dinâmico (Escadinha)
+                if max_profit_pct < config.LADDER_1_THRESHOLD:
+                    drop_limit = config.LADDER_1_STOP
+                    mode = "🛡️ PROTEÇÃO"
+                elif max_profit_pct < config.LADDER_2_THRESHOLD:
+                    drop_limit = config.LADDER_2_STOP
+                    mode = "📈 TENDÊNCIA"
+                else:
+                    drop_limit = config.LADDER_3_STOP
+                    mode = "🚀 MOONSHOT"
 
-            # Define Stop Price (Trailing)
-            stop_price = highest * (1 - drop_limit)
-            
-            # Define Status
-            status_label = "HOLD"
-            if pnl_pct > 0.01: status_label = "PROFIT"
-            if pnl_pct < -0.01: status_label = "LOSS"
-            
-            # Salva status no DB para o Dashboard
-            self.db.update_position_status(symbol, stop_price, status_label)
+                stop_price = highest * (1 - drop_limit)
+                
+                status_label = "HOLD"
+                if pnl_pct > 0.01: status_label = "PROFIT"
+                if pnl_pct < -0.01: status_label = "LOSS"
+                
+                self.db.update_position_status(symbol, stop_price, status_label)
 
-            # 1. Trailing Stop Loss Dinâmico
-            if current_price <= stop_price:
-                reason = f"Trailing Stop {mode} (Topo ${highest:.4f})"
-                self.log_event("INFO", "SELL", f"🔻 SAÍDA {symbol} | PnL: {pnl_pct*100:.2f}% | {mode}")
-                self.close_position(symbol, current_price, reason)
-                continue
+                # Trailing Stop Loss Dinâmico
+                if current_price <= stop_price:
+                    reason = f"Trailing Stop {mode} (Topo ${highest:.4f})"
+                    self.log_event("INFO", "SELL", f"🔻 SAÍDA {symbol} | PnL: {pnl_pct*100:.2f}% | {mode}")
+                    self.close_position(symbol, current_price, reason)
+                    continue
 
-            # 2. Stop Loss de Emergência (Fixo)
-            if pnl_pct <= -config.STOP_LOSS_PERCENT:
-                reason = "Stop Loss Fixo"
-                self.log_event("WARNING", "SELL", f"🛑 STOP LOSS {symbol} | PnL: {pnl_pct*100:.2f}%")
-                self.close_position(symbol, current_price, reason)
-                continue
-            
-            # 3. Take Profit (Alvo Fixo - Opcional, o Trailing costuma ser melhor)
-            if pnl_pct >= config.TAKE_PROFIT_PERCENT:
-                reason = "Take Profit Alvo"
-                self.log_event("SUCCESS", "SELL", f"💰 TAKE PROFIT {symbol} | PnL: {pnl_pct*100:.2f}%")
-                self.close_position(symbol, current_price, reason)
-                continue
+                # Stop Loss de Emergência
+                if pnl_pct <= -config.STOP_LOSS_PERCENT:
+                    reason = "Stop Loss Fixo"
+                    self.log_event("WARNING", "SELL", f"🛑 STOP LOSS {symbol} | PnL: {pnl_pct*100:.2f}%")
+                    self.close_position(symbol, current_price, reason)
+                    continue
+                
+                # Take Profit (Alvo Alto)
+                if pnl_pct >= config.TAKE_PROFIT_PERCENT:
+                    reason = "Take Profit Alvo"
+                    self.log_event("SUCCESS", "SELL", f"💰 TAKE PROFIT {symbol} | PnL: {pnl_pct*100:.2f}%")
+                    self.close_position(symbol, current_price, reason)
+                    continue
 
-            # Notificações de PnL (Telegram)
-            if pnl_pct > 0.03 and f"{symbol}_3%" not in self.alert_tracker:
-                self.notifier.send_alert(symbol, "Lucro > 3%", "HOLD", current_price, f"📈 PnL: +{pnl_pct*100:.1f}%")
-                self.alert_tracker.add(f"{symbol}_3%")
-            
-            if pnl_pct > 0.05 and f"{symbol}_5%" not in self.alert_tracker:
-                self.notifier.send_alert(symbol, "Lucro > 5%", "HOLD", current_price, f"🚀 PnL: +{pnl_pct*100:.1f}%")
-                self.alert_tracker.add(f"{symbol}_5%")
+                # Notificações de PnL (Telegram)
+                if pnl_pct > 0.03 and f"{symbol}_3%" not in self.alert_tracker:
+                    self.notifier.send_alert(symbol, "Lucro > 3%", "HOLD", current_price, f"📈 PnL: +{pnl_pct*100:.1f}%")
+                    self.alert_tracker.add(f"{symbol}_3%")
+                
+                if pnl_pct > 0.05 and f"{symbol}_5%" not in self.alert_tracker:
+                    self.notifier.send_alert(symbol, "Lucro > 5%", "HOLD", current_price, f"🚀 PnL: +{pnl_pct*100:.1f}%")
+                    self.alert_tracker.add(f"{symbol}_5%")
+
+
 
     def find_zombie_position(self, candidate_rsi=100):
         """
@@ -235,8 +258,11 @@ class BotController:
 
     def close_position(self, symbol, price, reason):
         # Usa o TradeExecutor para vender
-        success = self.executor.sell_position(symbol, price, reason)
+        success = self.executor.sell_position(symbol, reason)
         if success:
+            # Atualiza equity imediatamente após a venda para manter baseline correto
+            self.update_financials()
+            
             # Limpa tracker de alertas
             keys_to_remove = [k for k in self.alert_tracker if k.startswith(symbol)]
             for k in keys_to_remove: self.alert_tracker.remove(k)
@@ -247,12 +273,18 @@ class BotController:
 
     # --- SCANNER ---
     def scan_market(self):
-        print("\n🔍 ESCANEANDO (Filtros: RSI < 30 + Tendência + RVOL)...")
+        print("\n🔍 ESCANEANDO (Dual Strategy: Conservative + Scalp)...")
         tickers = self.api.get_ticker_24hr()
         if not tickers: return
 
         candidates = []
         active_symbols = self.db.data['active_positions']
+        
+        # Conta posições por tipo de estratégia (apenas para info)
+        conservative_count = sum(1 for p in active_symbols.values() if p.get('strategy_type', 'CONSERVATIVE') == 'CONSERVATIVE')
+        scalp_count = sum(1 for p in active_symbols.values() if p.get('strategy_type', 'CONSERVATIVE') == 'SCALP')
+        
+        print(f"   📊 Posições ativas: {conservative_count} Conservadoras | {scalp_count} Scalp")
         
         # 1. Filtro Bruto (Liquidez e Volatilidade)
         for t in tickers:
@@ -273,43 +305,49 @@ class BotController:
         # Ordena pelas que mais caíram/subiram (Interesse do mercado)
         candidates.sort(key=lambda x: abs(x['change']), reverse=True)
         
-        # 2. Filtro Fino (Indicadores Técnicos)
-        # Analisa até 15 candidatos para achar O MELHOR
-        
-        watchlist = [] # Lista para salvar no banco
+        # 2. Filtro Fino - DUAL STRATEGY
+        watchlist = []
+        conservative_opportunities = []  # Lista de oportunidades conservadoras
+        scalp_opportunities = []         # Lista de oportunidades scalp
         
         for cand in candidates[:15]: 
             sym = cand['symbol']
-            # Pega dados (Preço e Volume)
             klines_data = self.api.get_klines(sym, limit=110)
             if not klines_data: continue
 
             prices = [x[0] for x in klines_data]
             volumes = [x[1] for x in klines_data]
 
-            # A. Calcula RSI
+            # Calcula indicadores
             rsi = self.calculate_rsi(prices)
             if not rsi: continue
-
-            # B. Calcula EMA (Tendência)
+            
             ema = self.calculate_ema(prices, period=100)
             current_price = prices[-1]
+            rvol = self.calculate_rvol(volumes)
             
-            trend_ok = True
+            # === FILTRO DUAL ===
+            conservative_ok = False
+            scalp_ok = False
             status_reason = "WAIT"
             
-            if rsi > config.RSI_BUY_THRESHOLD:
+            # FILTRO 1: CONSERVATIVE (RSI < 23, segue EMA)
+            if rsi <= config.RSI_BUY_THRESHOLD:
+                conservative_ok = True
+                status_reason = "🛡️ CONSERVATIVE"
+                
+                if ema and current_price < ema:
+                    if rsi > 20:
+                        conservative_ok = False
+                        status_reason = "Downtrend"
+            
+            # FILTRO 2: SCALP (RSI < 40, ignora EMA)
+            if config.SCALP_ENABLED and rsi <= config.SCALP_RSI_MAX:
+                scalp_ok = True
+                if not conservative_ok:  # Só marca como scalp se não for conservadora
+                    status_reason = "⚡ SCALP"
+            elif rsi > config.RSI_BUY_THRESHOLD:
                 status_reason = f"RSI High ({rsi:.1f})"
-                trend_ok = False
-            
-            if ema and current_price < ema:
-                # Tendência de baixa
-                if rsi > 20: 
-                    trend_ok = False
-                    status_reason = "Downtrend"
-            
-            # C. Calcula RVOL (Volume Relativo)
-            rvol = self.calculate_rvol(volumes)
             
             # Adiciona à Watchlist
             watchlist.append({
@@ -317,40 +355,65 @@ class BotController:
                 'price': current_price,
                 'rsi': rsi,
                 'rvol': rvol,
-                'status': "BUY" if trend_ok else status_reason
+                'status': status_reason
             })
             
             # LOG DO CANDIDATO
-            status_icon = "✅" if trend_ok else "❌"
-            print(f"   🧐 {sym:<10} | RSI: {rsi:.1f} | EMA: {status_icon} | RVOL: {rvol:.1f}x | {status_reason}")
+            status_icon = "✅" if (conservative_ok or scalp_ok) else "❌"
+            print(f"   🧐 {sym:<10} | RSI: {rsi:.1f} | {status_icon} | {status_reason}")
 
-            if trend_ok:
-                success = self.execute_buy(sym, current_price, rsi)
-                
-                if not success: 
-                    # --- LÓGICA DE SWAP ---
-                    if rsi < 20:
-                        self.log_event("WARNING", "SWAP", f"🔄 Sem saldo para {sym}. Procurando Zumbis para troca...")
-                        zombie = self.find_zombie_position(candidate_rsi=rsi)
-                        
-                        if zombie:
-                            self.log_event("WARNING", "SWAP", f"⚔️ TROCA TÁTICA: Vendendo {zombie} para comprar {sym}")
-                            self.close_position(zombie, self.api.get_price(zombie), "SWAP por Oportunidade Melhor")
-                            time.sleep(2) 
-                            self.execute_buy(sym, current_price, rsi) 
-                        else:
-                            print("   ❄️ Nenhuma posição Zumbi encontrada.")
-                
-                if success or (rsi < 20 and zombie): 
-                    break
+            # Adiciona às listas de oportunidades
+            if conservative_ok:
+                conservative_opportunities.append({
+                    'symbol': sym,
+                    'price': current_price,
+                    'rsi': rsi,
+                    'priority': 1  # Conservadora tem prioridade alta
+                })
+            elif scalp_ok:
+                scalp_opportunities.append({
+                    'symbol': sym,
+                    'price': current_price,
+                    'rsi': rsi,
+                    'priority': 2  # Scalp tem prioridade menor
+                })
+        
+        # Ordena oportunidades por RSI (menor = melhor)
+        conservative_opportunities.sort(key=lambda x: x['rsi'])
+        scalp_opportunities.sort(key=lambda x: x['rsi'])
+        
+        # Combina todas oportunidades (conservadoras primeiro, depois scalp)
+        all_opportunities = conservative_opportunities + scalp_opportunities
+        
+        # Tenta comprar TODAS as oportunidades (limitado apenas pelo saldo)
+        for opp in all_opportunities:
+            sym = opp['symbol']
+            price = opp['price']
+            rsi = opp['rsi']
+            strategy = 'CONSERVATIVE' if opp['priority'] == 1 else 'SCALP'
             
-            time.sleep(0.2) # Delay leve
+            success = self.execute_buy(sym, price, rsi, strategy)
+            
+            if not success:
+                # Sistema Zombie: tenta substituir posição pior
+                if (strategy == 'CONSERVATIVE' and rsi < 20) or (strategy == 'SCALP' and rsi < 25):
+                    zombie = self.find_zombie_position(candidate_rsi=rsi)
+                    
+                    if zombie:
+                        icon = "🛡️" if strategy == 'CONSERVATIVE' else "⚡"
+                        self.log_event("WARNING", "SWAP", f"{icon} SWAP: {zombie} → {sym}")
+                        self.close_position(zombie, self.api.get_price(zombie), f"SWAP por {strategy}")
+                        time.sleep(2)
+                        self.execute_buy(sym, price, rsi, strategy)
+            
+            time.sleep(0.2)
 
-        # Salva Watchlist no Banco
+        # Salva Watchlist
         if watchlist:
             self.db.save_candidates(watchlist)
 
-    def execute_buy(self, symbol, price, rsi):
+
+    def execute_buy(self, symbol, price, rsi, strategy_type='CONSERVATIVE'):
         # --- GESTÃO DE CAPITAL PARA PEQUENAS CONTAS ---
         # Objetivo: Abrir o máximo de posições possíveis com o saldo disponível.
         
@@ -379,18 +442,24 @@ class BotController:
         # Arredonda para 2 casas para evitar erros de precisão na API
         amount = round(amount - 0.1, 2) # Tira 10 centavos para garantir que não vai faltar taxa
 
-        self.log_event("SUCCESS", "BUY", f"🚀 COMPRANDO {symbol} | RSI {rsi:.2f} | Alvo: ${amount:.2f}")
+        strategy_icon = "⚡" if strategy_type == 'SCALP' else "🛡️"
+        self.log_event("SUCCESS", "BUY", f"{strategy_icon} COMPRANDO {symbol} [{strategy_type}] | RSI {rsi:.2f} | Alvo: ${amount:.2f}")
         
         if not config.SIMULATION_MODE:
             res = self.api.place_order(symbol, 'BUY', amount)
             if not res: return False
         
-        self.db.add_position(symbol, price, amount, rsi)
+        self.db.add_position(symbol, price, amount, rsi, strategy_type)
+        
+        # Atualiza equity imediatamente após a compra para manter baseline correto
+        self.update_financials()
         
         # Notifica Telegram
-        self.notifier.send_alert(symbol, "RSI Oversold", "BUY", price, f"📉 RSI: {rsi:.1f}")
+        msg_extra = f"📉 RSI: {rsi:.1f} | {strategy_icon} {strategy_type}"
+        self.notifier.send_alert(symbol, "RSI Oversold", "BUY", price, msg_extra)
 
         return True
+
 
     # --- LOOP ---
     def run(self):

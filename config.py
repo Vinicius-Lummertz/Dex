@@ -38,6 +38,17 @@ LADDER_3_STOP = 0.060
 STOP_LOSS_PERCENT = 0.05     # 5% de prejuízo máximo (Emergência)
 TAKE_PROFIT_PERCENT = 0.10   # 10% de lucro (Alvo fixo opcional)
 
+# === DUAL STRATEGY SYSTEM ===
+# Estratégia de Scalping Agressivo (trades rápidos e frequentes)
+SCALP_ENABLED = True          # Habilita estratégia de scalping
+SCALP_RSI_MAX = 40            # RSI máximo para entrar em scalp (mais permissivo)
+SCALP_STOP_LOSS = 0.01        # Stop loss fixo para scalp: -1%
+SCALP_TAKE_PROFIT = 0.025     # Take profit fixo para scalp: +2.5%
+
+# NOTA: Sem limite de posições! Sistema Zombie troca por melhores oportunidades
+# MAX_SCALP_POSITIONS = 3       # (REMOVIDO - usa saldo disponível)
+# MAX_CONSERVATIVE_POSITIONS = 3 # (REMOVIDO - usa saldo disponível)
+
 # Blacklist
 IGNORED_COINS = [
     'USDCUSDT', 'FDUSDUSDT', 'USDPUSDT', 'TUSDUSDT', 'BUSDUSDT', 

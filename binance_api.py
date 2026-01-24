@@ -9,12 +9,49 @@ class BinanceClient:
     def __init__(self):
         self.session = requests.Session()
         self.session.headers.update({'X-MBX-APIKEY': API_KEY})
+        
+        # Sincronização de tempo com servidor Binance
+        self.time_offset = 0
+        self.last_sync_time = 0
+        self.sync_interval = 1800  # Recalibra a cada 30 minutos
+        self._sync_server_time()
+
+    def _sync_server_time(self):
+        """Sincroniza o tempo local com o servidor Binance para evitar erro -1021"""
+        try:
+            local_time_before = int(time.time() * 1000)
+            response = self.session.get(f"{BASE_URL}/api/v3/time")
+            
+            if response.status_code == 200:
+                server_time = response.json()['serverTime']
+                local_time_after = int(time.time() * 1000)
+                
+                # Calcula o tempo médio local durante a requisição
+                local_time_avg = (local_time_before + local_time_after) // 2
+                
+                # Calcula o offset entre servidor e cliente
+                self.time_offset = server_time - local_time_avg
+                self.last_sync_time = time.time()
+                
+                print(f"⏰ Tempo sincronizado com Binance (offset: {self.time_offset}ms)")
+            else:
+                print(f"⚠️ Falha ao sincronizar tempo do servidor: {response.status_code}")
+        except Exception as e:
+            print(f"⚠️ Erro ao sincronizar tempo: {e}")
+
+    def _get_timestamp(self):
+        """Retorna timestamp com offset corrigido"""
+        # Recalibra se passou do intervalo
+        if time.time() - self.last_sync_time > self.sync_interval:
+            self._sync_server_time()
+        
+        return int(time.time() * 1000) + self.time_offset
 
     def _send(self, method, endpoint, params=None, signed=False):
         if params is None: params = {}
         
         if signed:
-            params['timestamp'] = int(time.time() * 1000)
+            params['timestamp'] = self._get_timestamp()
             params['recvWindow'] = 60000
             query = urlencode(params)
             sig = hmac.new(SECRET_KEY.encode('utf-8'), query.encode('utf-8'), hashlib.sha256).hexdigest()
@@ -30,6 +67,18 @@ class BinanceClient:
                 
             if response.status_code == 200:
                 return response.json()
+            
+            # Se receber erro -1021, tenta sincronizar novamente
+            if response.status_code == 400 and '-1021' in response.text:
+                print(f"\n🚨 ERRO API [{response.status_code}]: {response.text}")
+                print("🔄 Ressincronizando com servidor...")
+                self._sync_server_time()
+                return None
+            
+            # Se receber erro -1013 (Market is closed), ignora silenciosamente
+            if response.status_code == 400 and '-1013' in response.text:
+                # Mercado fechado - retorna None sem alarme
+                return None
             
             print(f"\n🚨 ERRO API [{response.status_code}]: {response.text}")
             return None
